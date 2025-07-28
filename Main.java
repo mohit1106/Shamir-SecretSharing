@@ -5,54 +5,49 @@ import java.util.*;
 public class Main {
 
     public static void main(String[] args) throws Exception {
+        // read & split JSON objects
         String content = readAll("input.json").trim();
-        
-        List<String> jsonObjects = splitTopLevelObjects(content);
-        if (jsonObjects.isEmpty()) {
-            System.err.println("No JSON objects found in input.json");
-            return;
-        }
+        List<String> jsonObjs = splitTopLevelObjects(content);
 
         int tc = 1;
-        for (String js : jsonObjects) {
+        for (String js : jsonObjs) {
             TestCase t = parseTestCase(js);
-            BigInteger c = recoverConstant(t);
-            System.out.println("Test-case #" + (tc++) + " ⇒ c = " + c);
+            Result r = reconstructWithErrorDetection(t);
+            System.out.println("Test-case #" + (tc++) + " ⇒ secret c = " + r.secret);
+            if (!r.invalidShares.isEmpty()) {
+                System.out.println("  Invalid shares: " + r.invalidShares);
+            }
         }
     }
 
-    private static String readAll(String filename) throws IOException {
+    private static String readAll(String fn) throws IOException {
         StringBuilder sb = new StringBuilder();
-        try (BufferedReader r = new BufferedReader(new FileReader(filename))) {
+        try (BufferedReader r = new BufferedReader(new FileReader(fn))) {
             String line;
-            while ((line = r.readLine()) != null) {
-                sb.append(line).append("\n");
-            }
+            while ((line = r.readLine()) != null) sb.append(line).append("\n");
         }
         return sb.toString();
     }
 
     private static List<String> splitTopLevelObjects(String s) {
         s = s.trim();
-        List<String> objs = new ArrayList<>();
         if (s.startsWith("[")) {
             s = s.substring(1, s.lastIndexOf(']'));
         }
+        List<String> out = new ArrayList<>();
         int depth = 0, start = -1;
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);
             if (c == '{') {
-                if (depth == 0) start = i;
-                depth++;
+                if (depth++ == 0) start = i;
             } else if (c == '}') {
-                depth--;
-                if (depth == 0 && start >= 0) {
-                    objs.add(s.substring(start, i+1));
+                if (--depth == 0 && start != -1) {
+                    out.add(s.substring(start, i+1));
                     start = -1;
                 }
             }
         }
-        return objs;
+        return out;
     }
 
     static class TestCase {
@@ -60,52 +55,100 @@ public class Main {
         TreeMap<Integer, BigInteger> shares = new TreeMap<>();
     }
 
+    static class Result {
+        BigInteger secret;
+        List<Integer> invalidShares;
+        Result(BigInteger s, List<Integer> bad) {
+            secret = s; invalidShares = bad;
+        }
+    }
+
     private static TestCase parseTestCase(String js) throws IOException {
         TestCase tc = new TestCase();
-        try (BufferedReader br = new BufferedReader(new StringReader(js))) {
-            String line;
-            while ((line = br.readLine()) != null) {
-                line = line.trim();
-                // match "n":  10
-                if (line.matches("\"n\"\\s*:\\s*\\d+.*")) {
-                    tc.n = Integer.parseInt(line.replaceAll("[^0-9]", ""));
-                }
-                // match "k": 7
-                else if (line.matches("\"k\"\\s*:\\s*\\d+.*")) {
-                    tc.k = Integer.parseInt(line.replaceAll("[^0-9]", ""));
-                }
-                // match "123": {
-                else if (line.matches("\"\\d+\"\\s*:\\s*\\{")) {
-                    int x = Integer.parseInt(line.replaceAll("[^0-9]", ""));
-                    String baseLine  = br.readLine().trim();
-                    String valueLine = br.readLine().trim();
-                    int base = Integer.parseInt(baseLine.replaceAll("[^0-9]", ""));
-                    String val = valueLine.split(":")[1].replaceAll("[^A-Za-z0-9]", "");
-                    BigInteger y = new BigInteger(val, base);
-                    tc.shares.put(x, y);
-                }
+        BufferedReader br = new BufferedReader(new StringReader(js));
+        String line;
+        while ((line = br.readLine()) != null) {
+            line = line.trim();
+            if (line.matches("\"n\"\\s*:\\s*\\d+.*")) {
+                tc.n = Integer.parseInt(line.replaceAll("[^0-9]", ""));
+            } else if (line.matches("\"k\"\\s*:\\s*\\d+.*")) {
+                tc.k = Integer.parseInt(line.replaceAll("[^0-9]", ""));
+            } else if (line.matches("\"\\d+\"\\s*:\\s*\\{")) {
+                int x = Integer.parseInt(line.replaceAll("[^0-9]", ""));
+                String baseLine  = br.readLine().trim();
+                String valueLine = br.readLine().trim();
+                int base = Integer.parseInt(baseLine.replaceAll("[^0-9]", ""));
+                String val = valueLine.split(":")[1].replaceAll("[^A-Za-z0-9]", "");
+                tc.shares.put(x, new BigInteger(val, base));
             }
         }
         return tc;
     }
 
-    private static BigInteger recoverConstant(TestCase tc) {
-        int k = tc.k;
-        // pick smallest k x‑values
-        List<Map.Entry<Integer,BigInteger>> sel =
-            new ArrayList<>(tc.shares.entrySet()).subList(0, k);
+    private static Result reconstructWithErrorDetection(TestCase tc) {
+        int n = tc.n, k = tc.k;
+        List<Integer> xs = new ArrayList<>(tc.shares.keySet());
+        Map<BigInteger, Integer> freq = new HashMap<>();
+        Map<Integer, Integer> goodCount = new HashMap<>();
+        for (int x: xs) goodCount.put(x, 0);
 
-        BigInteger[][] A = new BigInteger[k][k];
-        BigInteger[]   Y = new BigInteger[k];
-        for (int i = 0; i < k; i++) {
-            BigInteger xi = BigInteger.valueOf(sel.get(i).getKey());
-            Y[i] = sel.get(i).getValue();
-            for (int j = 0; j < k; j++) {
-                A[i][j] = xi.pow(j);
+        int[] idx = new int[k];
+        for (int i = 0; i < k; i++) idx[i] = i;
+        while (true) {
+            BigInteger[] Ys = new BigInteger[k];
+            BigInteger[][] A = new BigInteger[k][k];
+            for (int i = 0; i < k; i++) {
+                int x = xs.get(idx[i]);
+                BigInteger xi = BigInteger.valueOf(x);
+                Ys[i] = tc.shares.get(x);
+                for (int j = 0; j < k; j++) {
+                    A[i][j] = xi.pow(j);
+                }
             }
+            BigInteger c0 = gaussianElim(A, Ys)[0];
+            freq.merge(c0, 1, Integer::sum);
+
+            int p = k-1;
+            while (p >= 0 && idx[p] == n - k + p) p--;
+            if (p < 0) break;
+            idx[p]++;
+            for (int j = p+1; j < k; j++) idx[j] = idx[j-1] + 1;
         }
-        BigInteger[] coeffs = gaussianElim(A, Y);
-        return coeffs[0];  
+
+        BigInteger secret = Collections.max(freq.entrySet(),
+            Comparator.comparingInt(Map.Entry::getValue)).getKey();
+
+        Arrays.setAll(idx, i -> i);
+        while (true) {
+            BigInteger[][] A = new BigInteger[k][k];
+            BigInteger[] Ys = new BigInteger[k];
+            for (int i = 0; i < k; i++) {
+                int x = xs.get(idx[i]);
+                BigInteger xi = BigInteger.valueOf(x);
+                Ys[i] = tc.shares.get(x);
+                for (int j = 0; j < k; j++) {
+                    A[i][j] = xi.pow(j);
+                }
+            }
+            BigInteger c0 = gaussianElim(A, Ys)[0];
+            if (c0.equals(secret)) {
+                for (int i = 0; i < k; i++) {
+                    goodCount.merge(xs.get(idx[i]), 1, Integer::sum);
+                }
+            }
+            int p = k-1;
+            while (p >= 0 && idx[p] == n - k + p) p--;
+            if (p < 0) break;
+            idx[p]++;
+            for (int j = p+1; j < k; j++) idx[j] = idx[j-1] + 1;
+        }
+
+        List<Integer> invalid = new ArrayList<>();
+        for (var e : goodCount.entrySet()) {
+            if (e.getValue() == 0) invalid.add(e.getKey());
+        }
+
+        return new Result(secret, invalid);
     }
 
     private static BigInteger[] gaussianElim(BigInteger[][] A, BigInteger[] Y) {
