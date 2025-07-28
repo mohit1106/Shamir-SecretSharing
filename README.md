@@ -2,7 +2,7 @@ This repository contains a **Java** implementation of a simplified Shamir's Secr
 
 ## 📁 Files
 
-- `ShamirSecret.java` — Main Java class implementing:
+- `Main.java` — Main Java class implementing:
 
   1. Manual JSON parsing of `input.json` (no external libraries).
   2. Decoding of mixed-base share values into `BigInteger`.
